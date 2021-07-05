@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"mime/multipart"
 	"net/http"
@@ -20,7 +19,6 @@ import (
 
 	"github.com/lucas-clemente/quic-go"
 	"github.com/lucas-clemente/quic-go/http3"
-	"github.com/lucas-clemente/quic-go/internal/testdata"
 	"github.com/lucas-clemente/quic-go/internal/utils"
 	"github.com/lucas-clemente/quic-go/logging"
 	"github.com/lucas-clemente/quic-go/qlog"
@@ -71,38 +69,9 @@ func setupHandler(www string) http.Handler {
 		})
 	}
 
-	mux.HandleFunc("/demo/tile", func(w http.ResponseWriter, r *http.Request) {
-		// Small 40x40 png
-		w.Write([]byte{
-			0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
-			0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x28,
-			0x01, 0x03, 0x00, 0x00, 0x00, 0xb6, 0x30, 0x2a, 0x2e, 0x00, 0x00, 0x00,
-			0x03, 0x50, 0x4c, 0x54, 0x45, 0x5a, 0xc3, 0x5a, 0xad, 0x38, 0xaa, 0xdb,
-			0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0x01, 0x63, 0x18,
-			0x61, 0x00, 0x00, 0x00, 0xf0, 0x00, 0x01, 0xe2, 0xb8, 0x75, 0x22, 0x00,
-			0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
-		})
-	})
-
-	mux.HandleFunc("/demo/tiles", func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, "<html><head><style>img{width:40px;height:40px;}</style></head><body>")
-		for i := 0; i < 200; i++ {
-			fmt.Fprintf(w, `<img src="/demo/tile?cachebust=%d">`, i)
-		}
-		io.WriteString(w, "</body></html>")
-	})
-
-	mux.HandleFunc("/demo/echo", func(w http.ResponseWriter, r *http.Request) {
-		body, err := ioutil.ReadAll(r.Body)
-		if err != nil {
-			fmt.Printf("error reading body while handling /echo: %s\n", err.Error())
-		}
-		w.Write(body)
-	})
-
 	// accept file uploads and return the MD5 of the uploaded file
 	// maximum accepted file size is 1 GB
-	mux.HandleFunc("/demo/upload", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/upload", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			err := r.ParseMultipartForm(1 << 30) // 1 GB
 			if err == nil {
@@ -145,6 +114,8 @@ func main() {
 	www := flag.String("www", "", "www data")
 	tcp := flag.Bool("tcp", false, "also listen on TCP")
 	enableQlog := flag.Bool("qlog", false, "output a qlog (in the same directory)")
+	certFile := flag.String("cert", "", "cert path")
+	keyFile := flag.String("key", "", "key path")
 	flag.Parse()
 
 	logger := utils.DefaultLogger
@@ -155,6 +126,22 @@ func main() {
 		logger.SetLogLevel(utils.LogLevelInfo)
 	}
 	logger.SetLogTimeFormat("")
+
+	if *certFile == "" {
+		logger.Errorf("cert argument is required\n")
+		os.Exit(1)
+	} else if _, err := os.Stat(*certFile); os.IsNotExist(err) {
+		logger.Errorf("cert file %s does not exist\n", *certFile)
+		os.Exit(1)
+	}
+
+	if *keyFile == "" {
+		logger.Errorf("key argument is required\n")
+		os.Exit(1)
+	} else if _, err := os.Stat(*keyFile); os.IsNotExist(err) {
+		logger.Errorf("key file %s does not exist\n", *keyFile)
+		os.Exit(1)
+	}
 
 	if len(bs) == 0 {
 		bs = binds{"localhost:6121"}
@@ -180,15 +167,16 @@ func main() {
 		bCap := b
 		go func() {
 			var err error
+
+			logger.Infof("Start server on %s\n", bCap)
 			if *tcp {
-				certFile, keyFile := testdata.GetCertificatePaths()
-				err = http3.ListenAndServe(bCap, certFile, keyFile, handler)
+				err = http3.ListenAndServe(bCap, *certFile, *keyFile, handler)
 			} else {
 				server := http3.Server{
 					Server:     &http.Server{Handler: handler, Addr: bCap},
 					QuicConfig: quicConf,
 				}
-				err = server.ListenAndServeTLS(testdata.GetCertificatePaths())
+				err = server.ListenAndServeTLS(*certFile, *keyFile)
 			}
 			if err != nil {
 				fmt.Println(err)

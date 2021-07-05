@@ -15,7 +15,6 @@ import (
 
 	"github.com/lucas-clemente/quic-go"
 	"github.com/lucas-clemente/quic-go/http3"
-	"github.com/lucas-clemente/quic-go/internal/testdata"
 	"github.com/lucas-clemente/quic-go/internal/utils"
 	"github.com/lucas-clemente/quic-go/logging"
 	"github.com/lucas-clemente/quic-go/qlog"
@@ -53,7 +52,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	testdata.AddRootCA(pool)
 
 	var qconf quic.Config
 	if *enableQlog {
