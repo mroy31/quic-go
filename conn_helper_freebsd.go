@@ -1,3 +1,4 @@
+//go:build freebsd
 // +build freebsd
 
 package quic
@@ -15,3 +16,5 @@ const (
 	msgTypeIPv4PKTINFO = 0x7
 	msgTypeIPv6PKTINFO = 0x2e
 )
+
+const batchSize = 8
