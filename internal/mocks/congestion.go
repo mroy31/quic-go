@@ -105,16 +105,16 @@ func (mr *MockSendAlgorithmWithDebugInfosMockRecorder) InSlowStart() *gomock.Cal
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "InSlowStart", reflect.TypeOf((*MockSendAlgorithmWithDebugInfos)(nil).InSlowStart))
 }
 
-// MaybeExitSlowStart mocks base method.
-func (m *MockSendAlgorithmWithDebugInfos) MaybeExitSlowStart() {
+// OnRttUpdated mocks base method.
+func (m *MockSendAlgorithmWithDebugInfos) OnRttUpdated() {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "MaybeExitSlowStart")
+	m.ctrl.Call(m, "OnRttUpdated")
 }
 
-// MaybeExitSlowStart indicates an expected call of MaybeExitSlowStart.
-func (mr *MockSendAlgorithmWithDebugInfosMockRecorder) MaybeExitSlowStart() *gomock.Call {
+// OnRttUpdated indicates an expected call of OnRttUpdated.
+func (mr *MockSendAlgorithmWithDebugInfosMockRecorder) OnRttUpdated() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MaybeExitSlowStart", reflect.TypeOf((*MockSendAlgorithmWithDebugInfos)(nil).MaybeExitSlowStart))
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnRttUpdated", reflect.TypeOf((*MockSendAlgorithmWithDebugInfos)(nil).OnRttUpdated))
 }
 
 // OnPacketAcked mocks base method.

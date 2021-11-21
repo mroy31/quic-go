@@ -1,6 +1,8 @@
 debug
 debug.test
 main
+bin
+docker
 mockgen_tmp.go
 *.qtr
 *.qlog

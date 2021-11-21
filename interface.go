@@ -7,6 +7,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/lucas-clemente/quic-go/internal/congestion"
 	"github.com/lucas-clemente/quic-go/internal/handshake"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/logging"
@@ -291,7 +292,9 @@ type Config struct {
 	// See https://datatracker.ietf.org/doc/draft-ietf-quic-datagram/.
 	// Datagrams will only be available when both peers enable datagram support.
 	EnableDatagrams bool
-	Tracer          logging.Tracer
+	// Congestion Algorithm
+	Congestion congestion.CongestionOptions
+	Tracer     logging.Tracer
 }
 
 // ConnectionState records basic details about a QUIC connection

@@ -3,12 +3,14 @@ package main
 import (
 	"bufio"
 	"crypto/md5"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -19,9 +21,22 @@ import (
 
 	"github.com/lucas-clemente/quic-go"
 	"github.com/lucas-clemente/quic-go/http3"
+	"github.com/lucas-clemente/quic-go/internal/congestion"
 	"github.com/lucas-clemente/quic-go/internal/utils"
 	"github.com/lucas-clemente/quic-go/logging"
 	"github.com/lucas-clemente/quic-go/qlog"
+)
+
+var (
+	congestionMap = map[string]congestion.CongestionControlType{
+		"newreno": congestion.NewRenoControlType,
+		"cubic":   congestion.CubicControlType,
+	}
+	hystartMap = map[string]congestion.HystartControlType{
+		"standard": congestion.HystartTypeStandard,
+		"plusplus": congestion.HystartTypePlusPlus,
+		"none":     congestion.HystartTypeNone,
+	}
 )
 
 type binds []string
@@ -101,21 +116,90 @@ func setupHandler(www string) http.Handler {
 	return mux
 }
 
-func main() {
-	// defer profile.Start().Stop()
-	go func() {
-		log.Println(http.ListenAndServe("localhost:6060", nil))
-	}()
-	// runtime.SetBlockProfileRate(1)
+func ListenAndServe(addr, certFile, keyFile, www string, quicConf *quic.Config) error {
+	// Load certs
+	var err error
+	certs := make([]tls.Certificate, 1)
+	certs[0], err = tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return err
+	}
+	// We currently only use the cert-related stuff from tls.Config,
+	// so we don't need to make a full copy.
+	tlsConfig := &tls.Config{
+		Certificates: certs,
+	}
 
+	// Open the listeners
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return err
+	}
+	udpConn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		return err
+	}
+	defer udpConn.Close()
+
+	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
+	if err != nil {
+		return err
+	}
+	tcpConn, err := net.ListenTCP("tcp", tcpAddr)
+	if err != nil {
+		return err
+	}
+	defer tcpConn.Close()
+
+	tlsConn := tls.NewListener(tcpConn, tlsConfig)
+	defer tlsConn.Close()
+
+	// Start the servers
+	httpServer := &http.Server{
+		Addr:      addr,
+		TLSConfig: tlsConfig,
+	}
+
+	quicServer := &http3.Server{
+		Server:     httpServer,
+		QuicConfig: quicConf,
+	}
+
+	handler := setupHandler(www)
+	httpServer.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		quicServer.SetQuicHeaders(w.Header())
+		handler.ServeHTTP(w, r)
+	})
+
+	hErr := make(chan error)
+	qErr := make(chan error)
+	go func() {
+		hErr <- httpServer.Serve(tlsConn)
+	}()
+	go func() {
+		qErr <- quicServer.Serve(udpConn)
+	}()
+
+	select {
+	case err := <-hErr:
+		quicServer.Close()
+		return err
+	case err := <-qErr:
+		// Cannot close the HTTP server or wait for requests to complete properly :/
+		return err
+	}
+}
+
+func main() {
 	verbose := flag.Bool("v", false, "verbose")
 	bs := binds{}
 	flag.Var(&bs, "bind", "bind to")
 	www := flag.String("www", "", "www data")
-	tcp := flag.Bool("tcp", false, "also listen on TCP")
 	enableQlog := flag.Bool("qlog", false, "output a qlog (in the same directory)")
 	certFile := flag.String("cert", "", "cert path")
 	keyFile := flag.String("key", "", "key path")
+	congestionAlgo := flag.String("congestion", "newreno", "congestion algorithm")
+	hystart := flag.String("hystart", "standard", "hystart algorithm")
 	flag.Parse()
 
 	logger := utils.DefaultLogger
@@ -147,8 +231,22 @@ func main() {
 		bs = binds{"localhost:6121"}
 	}
 
-	handler := setupHandler(*www)
 	quicConf := &quic.Config{}
+	congestionControl, found := congestionMap[*congestionAlgo]
+	if !found {
+		logger.Errorf("congestion control algo %s is not found\n", *congestionAlgo)
+		os.Exit(1)
+	}
+	hystartControl, found := hystartMap[*hystart]
+	if !found {
+		logger.Errorf("hystart algo %s is not found\n", *hystart)
+		os.Exit(1)
+	}
+	quicConf.Congestion = congestion.CongestionOptions{
+		ControlType: congestionControl,
+		Hystart:     hystartControl,
+	}
+
 	if *enableQlog {
 		quicConf.Tracer = qlog.NewTracer(func(_ logging.Perspective, connID []byte) io.WriteCloser {
 			filename := fmt.Sprintf("server_%x.qlog", connID)
@@ -169,15 +267,7 @@ func main() {
 			var err error
 
 			logger.Infof("Start server on %s\n", bCap)
-			if *tcp {
-				err = http3.ListenAndServe(bCap, *certFile, *keyFile, handler)
-			} else {
-				server := http3.Server{
-					Server:     &http.Server{Handler: handler, Addr: bCap},
-					QuicConfig: quicConf,
-				}
-				err = server.ListenAndServeTLS(*certFile, *keyFile)
-			}
+			err = ListenAndServe(b, *certFile, *keyFile, *www, quicConf)
 			if err != nil {
 				fmt.Println(err)
 			}

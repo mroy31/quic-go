@@ -85,7 +85,9 @@ type CongestionState uint8
 const (
 	// CongestionStateSlowStart is the slow start phase of Reno / Cubic
 	CongestionStateSlowStart CongestionState = iota
-	// CongestionStateCongestionAvoidance is the slow start phase of Reno / Cubic
+	// CongestionStateLowSlowStart is a specific case when Hystart++ is used
+	CongestionStateLowSlowStart
+	// CongestionStateCongestionAvoidance is the congestion avoidance phase of Reno / Cubic
 	CongestionStateCongestionAvoidance
 	// CongestionStateCongestionAvoidance is the recovery phase of Reno / Cubic
 	CongestionStateRecovery

@@ -507,7 +507,7 @@ type eventCongestionStateUpdated struct {
 	state congestionState
 }
 
-func (e eventCongestionStateUpdated) Category() category { return categoryRecovery }
+func (e eventCongestionStateUpdated) Category() category { return categoryTransport }
 func (e eventCongestionStateUpdated) Name() string       { return "congestion_state_updated" }
 func (e eventCongestionStateUpdated) IsNil() bool        { return false }
 

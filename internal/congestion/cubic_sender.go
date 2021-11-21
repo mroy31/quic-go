@@ -14,19 +14,23 @@ const (
 	// Used in QUIC for congestion window computations in bytes.
 	initialMaxDatagramSize     = protocol.ByteCount(protocol.InitialPacketSizeIPv4)
 	maxBurstPackets            = 3
-	renoBeta                   = 0.7 // Reno backoff factor.
+	renoBeta                   = 0.5 // Reno backoff factor.
 	minCongestionWindowPackets = 2
 	initialCongestionWindow    = 32
+	// hystart++ constants
+	lssDivisor = 0.25
 )
 
 type cubicSender struct {
-	hybridSlowStart HybridSlowStart
-	rttStats        *utils.RTTStats
-	cubic           *Cubic
-	pacer           *pacer
-	clock           Clock
+	hybridSlowStartType HystartControlType
+	hybridSlowStart     HybridSlowStart
+	rttStats            *utils.RTTStats
+	cubic               *Cubic
+	pacer               *pacer
+	clock               Clock
 
-	reno bool
+	lowSlowStart bool
+	reno         bool
 
 	// Track the largest packet that has been sent.
 	largestSentPacketNumber protocol.PacketNumber
@@ -70,6 +74,7 @@ func NewCubicSender(
 	rttStats *utils.RTTStats,
 	initialMaxDatagramSize protocol.ByteCount,
 	reno bool,
+	hystart HystartControlType,
 	tracer logging.ConnectionTracer,
 ) *cubicSender {
 	return newCubicSender(
@@ -79,6 +84,7 @@ func NewCubicSender(
 		initialMaxDatagramSize,
 		initialCongestionWindow*initialMaxDatagramSize,
 		protocol.MaxCongestionWindowPackets*initialMaxDatagramSize,
+		hystart,
 		tracer,
 	)
 }
@@ -90,6 +96,7 @@ func newCubicSender(
 	initialMaxDatagramSize,
 	initialCongestionWindow,
 	initialMaxCongestionWindow protocol.ByteCount,
+	hystart HystartControlType,
 	tracer logging.ConnectionTracer,
 ) *cubicSender {
 	c := &cubicSender{
@@ -104,6 +111,8 @@ func newCubicSender(
 		cubic:                      NewCubic(clock),
 		clock:                      clock,
 		reno:                       reno,
+		hybridSlowStartType:        hystart,
+		lowSlowStart:               false,
 		tracer:                     tracer,
 		maxDatagramSize:            initialMaxDatagramSize,
 	}
@@ -144,7 +153,9 @@ func (c *cubicSender) OnPacketSent(
 		return
 	}
 	c.largestSentPacketNumber = packetNumber
-	c.hybridSlowStart.OnPacketSent(packetNumber)
+	if c.hybridSlowStartType != HystartTypeNone {
+		c.hybridSlowStart.OnPacketSent(packetNumber)
+	}
 }
 
 func (c *cubicSender) CanSend(bytesInFlight protocol.ByteCount) bool {
@@ -163,12 +174,18 @@ func (c *cubicSender) GetCongestionWindow() protocol.ByteCount {
 	return c.congestionWindow
 }
 
-func (c *cubicSender) MaybeExitSlowStart() {
-	if c.InSlowStart() &&
-		c.hybridSlowStart.ShouldExitSlowStart(c.rttStats.LatestRTT(), c.rttStats.MinRTT(), c.GetCongestionWindow()/c.maxDatagramSize) {
-		// exit slow start
-		c.slowStartThreshold = c.congestionWindow
-		c.maybeTraceStateChange(logging.CongestionStateCongestionAvoidance)
+func (c *cubicSender) OnRttUpdated() {
+	if c.InSlowStart() {
+		if c.hybridSlowStartType != HystartTypeNone &&
+			c.hybridSlowStart.ShouldExitSlowStart(c.rttStats.LatestRTT(), c.rttStats.MinRTT(), c.GetCongestionWindow()/c.maxDatagramSize) {
+			c.slowStartThreshold = c.congestionWindow
+			if c.hybridSlowStartType == HystartTypeStandard {
+				c.maybeTraceStateChange(logging.CongestionStateCongestionAvoidance)
+			} else { // Hystart++
+				c.lowSlowStart = true
+				c.maybeTraceStateChange(logging.CongestionStateLowSlowStart)
+			}
+		}
 	}
 }
 
@@ -210,6 +227,8 @@ func (c *cubicSender) OnPacketLost(packetNumber protocol.PacketNumber, lostBytes
 	// reset packet count from congestion avoidance mode. We start
 	// counting again when we're out of recovery.
 	c.numAckedPackets = 0
+	// exit LSS if needed
+	c.lowSlowStart = false
 }
 
 // Called when we receive an ack. Normal TCP tracks how many packets one ack
@@ -236,17 +255,36 @@ func (c *cubicSender) maybeIncreaseCwnd(
 		c.maybeTraceStateChange(logging.CongestionStateSlowStart)
 		return
 	}
-	// Congestion avoidance
-	c.maybeTraceStateChange(logging.CongestionStateCongestionAvoidance)
+
+	// Congestion avoidance or LSS
+	// First calculate cwnd with CA algorithm
+	caCwnd := c.congestionWindow
 	if c.reno {
 		// Classic Reno congestion avoidance.
 		c.numAckedPackets++
 		if c.numAckedPackets >= uint64(c.congestionWindow/c.maxDatagramSize) {
-			c.congestionWindow += c.maxDatagramSize
+			caCwnd = c.congestionWindow + c.maxDatagramSize
 			c.numAckedPackets = 0
 		}
 	} else {
-		c.congestionWindow = utils.MinByteCount(c.maxCongestionWindow(), c.cubic.CongestionWindowAfterAck(ackedBytes, c.congestionWindow, c.rttStats.MinRTT(), eventTime))
+		// Use cubic function to update cwnd
+		caCwnd = utils.MinByteCount(
+			c.maxCongestionWindow(),
+			c.cubic.CongestionWindowAfterAck(ackedBytes, c.congestionWindow, c.rttStats.MinRTT(), eventTime))
+	}
+	// if LSS is activated, take the max between CA cwnd and the LSS cwnd
+	if c.lowSlowStart {
+		// TCP low slow start activated by hystart++
+		K := float64(c.congestionWindow) / (lssDivisor * float64(c.slowStartThreshold))
+		newCwnd := c.congestionWindow + protocol.ByteCount(float64(c.maxDatagramSize)/K)
+		c.congestionWindow = utils.MaxByteCount(
+			caCwnd,
+			utils.MinByteCount(c.maxCongestionWindow(), newCwnd))
+		c.maybeTraceStateChange(logging.CongestionStateLowSlowStart)
+		return
+	} else {
+		c.congestionWindow = caCwnd
+		c.maybeTraceStateChange(logging.CongestionStateCongestionAvoidance)
 	}
 }
 
@@ -279,6 +317,7 @@ func (c *cubicSender) OnRetransmissionTimeout(packetsRetransmitted bool) {
 	c.hybridSlowStart.Restart()
 	c.cubic.Reset()
 	c.slowStartThreshold = c.congestionWindow / 2
+	c.lowSlowStart = false
 	c.congestionWindow = c.minCongestionWindow()
 }
 
@@ -289,6 +328,7 @@ func (c *cubicSender) OnConnectionMigration() {
 	c.largestAckedPacketNumber = protocol.InvalidPacketNumber
 	c.largestSentAtLastCutback = protocol.InvalidPacketNumber
 	c.lastCutbackExitedSlowstart = false
+	c.lowSlowStart = false
 	c.cubic.Reset()
 	c.numAckedPackets = 0
 	c.congestionWindow = c.initialCongestionWindow

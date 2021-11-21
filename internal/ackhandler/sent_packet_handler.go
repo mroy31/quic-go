@@ -106,14 +106,14 @@ func newSentPacketHandler(
 	initialMaxDatagramSize protocol.ByteCount,
 	rttStats *utils.RTTStats,
 	pers protocol.Perspective,
+	congestionOptions congestion.CongestionOptions,
 	tracer logging.ConnectionTracer,
 	logger utils.Logger,
 ) *sentPacketHandler {
-	congestion := congestion.NewCubicSender(
-		congestion.DefaultClock{},
+	congestionHandler := congestion.NewCongestionHandler(
 		rttStats,
 		initialMaxDatagramSize,
-		true, // use Reno
+		congestionOptions,
 		tracer,
 	)
 
@@ -124,7 +124,7 @@ func newSentPacketHandler(
 		handshakePackets:               newPacketNumberSpace(0, false, rttStats),
 		appDataPackets:                 newPacketNumberSpace(0, true, rttStats),
 		rttStats:                       rttStats,
-		congestion:                     congestion,
+		congestion:                     congestionHandler,
 		perspective:                    pers,
 		tracer:                         tracer,
 		logger:                         logger,
@@ -316,7 +316,7 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 			if h.logger.Debug() {
 				h.logger.Debugf("\tupdated RTT: %s (σ: %s)", h.rttStats.SmoothedRTT(), h.rttStats.MeanDeviation())
 			}
-			h.congestion.MaybeExitSlowStart()
+			h.congestion.OnRttUpdated()
 		}
 	}
 	if err := h.detectLostPackets(rcvTime, encLevel); err != nil {
